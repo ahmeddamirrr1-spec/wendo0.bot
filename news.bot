@@ -1,0 +1,69 @@
+"""بوت الأخبار: ذهب / فوركس / بيتكوين / أسواق. شغّله: python news_bot.py"""
+import asyncio, html, re, sqlite3
+import feedparser, httpx
+from common import send
+
+INTERVAL = 45  # ثانية بين كل فحص
+
+# تأكد من الروابط دي (بتتغير أحيانا). الرابط الشغال بس هيرجّع أخبار.
+FEEDS = [
+    "https://www.forexlive.com/feed/news",
+    "https://www.fxstreet.com/rss/news",
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+]
+
+CATEGORIES = {
+    "🟡 ذهب": r"\b(gold|xau|bullion)\b",
+    "💱 فوركس": r"\b(forex|fx|usd|eur|gbp|jpy|dollar|fed|ecb|boj|cpi|nfp|rate)\b",
+    "₿ كريبتو": r"\b(bitcoin|btc|ethereum|eth|crypto)\b",
+    "📊 أسواق": r"\b(stocks?|nasdaq|s&p|dow|oil|yields?|inflation)\b",
+}
+
+db = sqlite3.connect("seen.db")
+db.execute("CREATE TABLE IF NOT EXISTS seen (id TEXT PRIMARY KEY)")
+
+
+def is_new(uid: str) -> bool:
+    try:
+        db.execute("INSERT INTO seen VALUES (?)", (uid,))
+        db.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def classify(text: str):
+    return [c for c, p in CATEGORIES.items() if re.search(p, text, re.I)]
+
+
+async def poll_feed(client, url, first_run):
+    try:
+        r = await client.get(url, timeout=15)
+        feed = feedparser.parse(r.text)
+    except Exception as e:
+        print("feed error", url, e)
+        return
+    for e in reversed(feed.entries):
+        uid = e.get("id") or e.get("link")
+        if not uid or not is_new(uid) or first_run:
+            continue
+        title = e.get("title", "")
+        tags = classify(title + " " + e.get("summary", ""))
+        if not tags:
+            continue
+        msg = f"{' '.join(tags)}\n<b>{html.escape(title)}</b>\n{e.get('link', '')}"
+        await send(client, msg, html=True)
+
+
+async def main():
+    async with httpx.AsyncClient(headers={"User-Agent": "Mozilla/5.0"}) as client:
+        first = True  # أول دورة تحفظ القديم بدون إرسال
+        while True:
+            await asyncio.gather(*(poll_feed(client, u, first) for u in FEEDS))
+            first = False
+            await asyncio.sleep(INTERVAL)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
