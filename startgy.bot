@@ -1,0 +1,87 @@
+"""منطق الإشارات (السيولة / الهيكل / FVG / Delta) + جلب البيانات من Binance.
+نفس الملف بيستخدمه البوت المباشر (signals.py) والـ Backtest (backtest.py)،
+عشان النتيجتين دايما يمثلوا نفس المنطق."""
+import time
+import httpx
+import pandas as pd
+
+URL = "https://api.binance.com/api/v3/klines"
+COLS = ["t", "o", "h", "l", "c", "v", "ct", "qv", "n", "tbb", "tbq", "x"]
+STEP_MS = {"5m": 300_000, "15m": 900_000, "1h": 3_600_000}
+
+LABELS = {
+    "sweep_ssl_long": "🟢 Sweep لسيولة البيع (رفض من تحت)",
+    "sweep_bsl_short": "🔴 Sweep لسيولة الشراء (رفض من فوق)",
+    "bos_up_long": "⬆️ BOS صاعد (إغلاق فوق آخر قمة)",
+    "bos_dn_short": "⬇️ BOS هابط (إغلاق تحت آخر قاع)",
+    "fvg_bull_long": "🟩 FVG صاعد",
+    "fvg_bear_short": "🟥 FVG هابط",
+    "delta_buy_long": "💪 Delta: شراء عدواني قوي",
+    "delta_sell_short": "💪 Delta: بيع عدواني قوي",
+    "CONF_long": "✅ تقاطع: Sweep سيولة بيع + Delta موجب",
+    "CONF_short": "✅ تقاطع: Sweep سيولة شراء + Delta سالب",
+}
+
+
+def _to_df(rows):
+    df = pd.DataFrame(rows, columns=COLS).drop_duplicates("t")
+    for c in ["o", "h", "l", "c", "v", "tbb"]:
+        df[c] = df[c].astype(float)
+    df["delta"] = 2 * df["tbb"] - df["v"]  # شراء عدواني - بيع عدواني
+    df["time"] = pd.to_datetime(df["t"], unit="ms")
+    return df.reset_index(drop=True)
+
+
+def fetch_recent(symbol="BTCUSDT", tf="15m", limit=300):
+    """آخر شموع للبوت المباشر (بدون الشمعة الجارية)."""
+    r = httpx.get(
+        URL,
+        params={"symbol": symbol, "interval": tf, "limit": limit},
+        timeout=15,
+    )
+    r.raise_for_status()
+    return _to_df(r.json()).iloc[:-1].reset_index(drop=True)
+
+
+def fetch_history(symbol="BTCUSDT", tf="15m", days=180):
+    """بيانات تاريخية للـ Backtest."""
+    end = int(time.time() * 1000)
+    start = end - days * 86_400_000
+    rows = []
+    while start < end:
+        r = httpx.get(
+            URL,
+            params={"symbol": symbol, "interval": tf, "startTime": start, "limit": 1000},
+            timeout=20,
+        )
+        r.raise_for_status()
+        batch = r.json()
+        if not batch:
+            break
+        rows += batch
+        start = batch[-1][0] + STEP_MS[tf]
+        time.sleep(0.2)
+    return _to_df(rows).iloc[:-1].reset_index(drop=True)
+
+
+def build_signals(df, n=5):
+    w = 2 * n + 1
+    sh = df.h.where(df.h.rolling(w, center=True).max() == df.h)
+    sl = df.l.where(df.l.rolling(w, center=True).min() == df.l)
+    # Swings مؤكدة فقط (بعد n شموع) عشان ما نتلصصش على المستقبل
+    hi, lo = sh.shift(n).ffill(), sl.shift(n).ffill()
+    avg = df.delta.abs().rolling(50).mean()
+
+    s = pd.DataFrame(index=df.index)
+    s["sweep_ssl_long"] = (df.l < lo) & (df.c > lo)
+    s["sweep_bsl_short"] = (df.h > hi) & (df.c < hi)
+    s["bos_up_long"] = df.c > hi
+    s["bos_dn_short"] = df.c < lo
+    s["fvg_bull_long"] = df.l > df.h.shift(2)
+    s["fvg_bear_short"] = df.h < df.l.shift(2)
+    s["delta_buy_long"] = df.delta > 2 * avg
+    s["delta_sell_short"] = df.delta < -2 * avg
+    s["CONF_long"] = s.sweep_ssl_long & (df.delta > 0)
+    s["CONF_short"] = s.sweep_bsl_short & (df.delta < 0)
+    s = s.fillna(False).astype(bool)
+    return s & ~s.shift(1, fill_value=False)  # أول ظهور فقط
