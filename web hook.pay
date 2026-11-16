@@ -1,0 +1,27 @@
+"""استقبال تنبيهات TradingView. شغّله: uvicorn webhook:app --host 0.0.0.0 --port 8000
+(محتاج HTTPS على 443 أو 80 قدام السيرفر، مثلا Caddy أو Cloudflare Tunnel)"""
+import os
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from common import send
+
+SECRET = os.environ["WEBHOOK_SECRET"]
+app = FastAPI()
+
+
+@app.post("/tv")
+async def tv_webhook(req: Request):
+    try:
+        data = await req.json()
+    except Exception:
+        raise HTTPException(400, "invalid json")
+    if data.get("secret") != SECRET:
+        raise HTTPException(403)
+    text = (
+        f"📈 {data.get('symbol')} | {data.get('action')}\n"
+        f"السعر: {data.get('price')}\n"
+        f"الفريم: {data.get('tf')}"
+    )
+    async with httpx.AsyncClient() as client:
+        await send(client, text)
+    return {"ok": True}
