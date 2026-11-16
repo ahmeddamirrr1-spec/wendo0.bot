@@ -1,0 +1,40 @@
+"""بوت إشارات السيولة والهيكل المباشر. شغّله: python signals.py"""
+import asyncio
+import httpx
+from common import send
+from strategy import fetch_recent, build_signals, LABELS
+
+# الذهب: PAXGUSDT توكن ذهب على Binance (بديل تقريبي للسبوت)
+WATCH = [("BTCUSDT", "15m"), ("PAXGUSDT", "15m")]
+POLL = 60  # ثانية
+
+
+async def main():
+    last = {}
+    async with httpx.AsyncClient() as client:
+        while True:
+            for sym, tf in WATCH:
+                try:
+                    df = await asyncio.to_thread(fetch_recent, sym, tf)
+                    t = df.iloc[-1]["t"]
+                    if last.get((sym, tf)) == t:
+                        continue
+                    last[(sym, tf)] = t
+                    s = build_signals(df)
+                    row = s.iloc[-1]
+                    hits = [LABELS[k] for k in s.columns if row[k]]
+                    if hits:
+                        c = df.iloc[-1]
+                        msg = (
+                            f"{sym} {tf} | {c['time']:%Y-%m-%d %H:%M} UTC\n"
+                            f"إغلاق: {c['c']:.2f}\n" + "\n".join(hits)
+                            + "\n\n(تنبيه وليس توصية)"
+                        )
+                        await send(client, msg)
+                except Exception as e:
+                    print("error", sym, tf, e)
+            await asyncio.sleep(POLL)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
